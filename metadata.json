@@ -1,0 +1,8 @@
+{
+  "name": "NEO: Reactive Pet Companion",
+  "description": "A high-fidelity digital pet with fluid animations, visual awareness, and spontaneous robot-like behaviors.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ]
+}

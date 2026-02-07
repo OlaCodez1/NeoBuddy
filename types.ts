@@ -1,0 +1,12 @@
+
+export enum RobotState {
+  IDLE = 'IDLE',
+  LISTENING = 'LISTENING',
+  THINKING = 'THINKING',
+  SPEAKING = 'SPEAKING',
+  SNEEZING = 'SNEEZING',
+  SINGING = 'SINGING',
+  DISTORTED = 'DISTORTED',
+  HAPPY = 'HAPPY',
+  OFF = 'OFF'
+}
