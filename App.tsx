@@ -4,9 +4,11 @@ import { GoogleGenAI, LiveServerMessage, Modality, Type } from '@google/genai';
 import Face from './components/Face';
 import { RobotState } from './types';
 
-// Constants for Video Streaming
-const FRAME_RATE = 2; // Frames per second
-const JPEG_QUALITY = 0.5;
+// Constants for Video & Tracking
+const FRAME_RATE = 2; // Gemini vision rate
+const TRACKING_RATE = 10; // Local eye-tracking rate
+const JPEG_QUALITY = 0.4;
+const CAMERA_TIMEOUT_MS = 5000;
 
 // Audio Helpers
 function decode(base64: string) {
@@ -61,8 +63,9 @@ function createBlob(data: Float32Array): any {
 const App: React.FC = () => {
   const [robotState, setRobotState] = useState<RobotState>(RobotState.OFF);
   const [audioLevel, setAudioLevel] = useState(0);
-  const [currentVoice, setCurrentVoice] = useState('Kore');
-  const [showCamera, setShowCamera] = useState(false);
+  const [trackingPos, setTrackingPos] = useState({ x: 0, y: 0 });
+  const [showCamera, setShowCamera] = useState(true);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
   
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -70,8 +73,40 @@ const App: React.FC = () => {
   const sessionRef = useRef<any>(null);
   const nextStartTimeRef = useRef(0);
   const sourcesRef = useRef<Set<AudioBufferSourceNode>>(new Set());
-  const lastInteractionRef = useRef(Date.now());
   const videoStreamRef = useRef<MediaStream | null>(null);
+
+  // Local Face Tracking Loop
+  useEffect(() => {
+    if (!showCamera || robotState === RobotState.OFF) return;
+
+    let detector: any = null;
+    const hasFaceDetector = 'FaceDetector' in window;
+    if (hasFaceDetector) {
+      try {
+        detector = new (window as any).FaceDetector({ maxDetectedFaces: 1, fastMode: true });
+      } catch (e) {
+        console.warn("FaceDetector initialization failed", e);
+      }
+    }
+
+    const interval = setInterval(async () => {
+      if (videoRef.current && videoRef.current.readyState === 4 && detector) {
+        try {
+          const faces = await detector.detect(videoRef.current);
+          if (faces.length > 0) {
+            const face = faces[0].boundingBox;
+            const centerX = (face.x + face.width / 2) / videoRef.current.videoWidth;
+            const centerY = (face.y + face.height / 2) / videoRef.current.videoHeight;
+            setTrackingPos({ x: (centerX - 0.5) * -1, y: centerY - 0.5 });
+          }
+        } catch (e) {
+          // Silent fail for detector errors to keep app running
+        }
+      }
+    }, 1000 / TRACKING_RATE);
+
+    return () => clearInterval(interval);
+  }, [showCamera, robotState]);
 
   const analyzeVolume = (buffer: AudioBuffer) => {
     const data = buffer.getChannelData(0);
@@ -82,71 +117,46 @@ const App: React.FC = () => {
     setTimeout(() => setAudioLevel(0), buffer.duration * 1000);
   };
 
-  // Sentience loop
-  useEffect(() => {
-    if (robotState === RobotState.OFF) return;
-    const interval = setInterval(() => {
-      if (robotState !== RobotState.IDLE) return;
-      const r = Math.random();
-      if (r < 0.03) {
-        setRobotState(RobotState.SNEEZING);
-        setTimeout(() => setRobotState(RobotState.IDLE), 800);
-      } else if (r < 0.05) {
-        setRobotState(RobotState.SINGING);
-        setTimeout(() => setRobotState(RobotState.IDLE), 3000);
-      } else if (r < 0.07) {
-        setRobotState(RobotState.HAPPY);
-        setTimeout(() => setRobotState(RobotState.IDLE), 2000);
-      }
-    }, 4000);
-    return () => clearInterval(interval);
-  }, [robotState]);
-
   const startSession = async () => {
     if (!process.env.API_KEY) return;
+    setErrorMsg(null);
 
     try {
+      // 1. Initialize Audio First (Mission Critical)
       const inputCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
       const outputCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
       audioContextsRef.current = { input: inputCtx, output: outputCtx };
 
-      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
       const audioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
       
-      // Optional camera setup
+      // 2. Attempt Camera Access with Timeout (Non-Critical)
       let videoStream: MediaStream | null = null;
       if (showCamera) {
         try {
-          videoStream = await navigator.mediaDevices.getUserMedia({ video: true });
+          const videoPromise = navigator.mediaDevices.getUserMedia({ video: true });
+          const timeoutPromise = new Promise<null>((_, reject) => 
+            setTimeout(() => reject(new Error('Camera timeout')), CAMERA_TIMEOUT_MS)
+          );
+          
+          videoStream = await (Promise.race([videoPromise, timeoutPromise]) as Promise<MediaStream>);
           videoStreamRef.current = videoStream;
-          if (videoRef.current) videoRef.current.srcObject = videoStream;
+          if (videoRef.current) {
+            videoRef.current.srcObject = videoStream;
+            await videoRef.current.play().catch(() => {});
+          }
         } catch (e) {
-          console.warn("Camera permission denied, continuing with audio only.");
+          console.warn("Vision initialization failed or timed out. NEO will run in Audio-only mode.", e);
+          setShowCamera(false);
         }
       }
 
-      const changeVoiceDeclaration = {
-        name: 'changeVoice',
-        parameters: {
-          type: Type.OBJECT,
-          description: 'Change the voice of the companion to a different personality.',
-          properties: {
-            voiceName: {
-              type: Type.STRING,
-              description: 'The name of the new voice. Options: Puck, Charon, Kore, Fenrir, Zephyr.',
-            },
-          },
-          required: ['voiceName'],
-        },
-      };
-
+      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
       const sessionPromise = ai.live.connect({
         model: 'gemini-2.5-flash-native-audio-preview-12-2025',
         callbacks: {
           onopen: () => {
             setRobotState(RobotState.IDLE);
             
-            // Microphone Stream
             const source = inputCtx.createMediaStreamSource(audioStream);
             const scriptProcessor = inputCtx.createScriptProcessor(4096, 1, 1);
             scriptProcessor.onaudioprocess = (e) => {
@@ -157,17 +167,15 @@ const App: React.FC = () => {
             source.connect(scriptProcessor);
             scriptProcessor.connect(inputCtx.destination);
 
-            // Video Frames Stream
             if (videoStream) {
               const interval = setInterval(() => {
                 if (!videoRef.current || !canvasRef.current) return;
-                const video = videoRef.current;
                 const canvas = canvasRef.current;
                 const ctx = canvas.getContext('2d');
                 if (!ctx) return;
-                canvas.width = video.videoWidth / 4;
-                canvas.height = video.videoHeight / 4;
-                ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+                canvas.width = 320;
+                canvas.height = 240;
+                ctx.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
                 const base64Data = canvas.toDataURL('image/jpeg', JPEG_QUALITY).split(',')[1];
                 sessionPromise.then(session => {
                   session.sendRealtimeInput({ media: { data: base64Data, mimeType: 'image/jpeg' } });
@@ -177,19 +185,6 @@ const App: React.FC = () => {
             }
           },
           onmessage: async (message: LiveServerMessage) => {
-            if (message.toolCall) {
-              for (const fc of message.toolCall.functionCalls) {
-                if (fc.name === 'changeVoice') {
-                  setCurrentVoice(fc.args.voiceName);
-                  sessionPromise.then(s => s.sendToolResponse({
-                    functionResponses: { id: fc.id, name: fc.name, response: { result: "Voice changed successfully. I will sound different in the next session." } }
-                  }));
-                  // Since Live API config is immutable once connected, we'd need a reconnect 
-                  // to actually change the speaker. For now, we'll inform the user.
-                }
-              }
-            }
-
             if (message.serverContent?.modelTurn?.parts[0]?.inlineData?.data) {
               setRobotState(RobotState.SPEAKING);
               const audioString = message.serverContent.modelTurn.parts[0].inlineData.data;
@@ -210,7 +205,6 @@ const App: React.FC = () => {
                 sourcesRef.current.add(source);
               }
             }
-
             if (message.serverContent?.interrupted) {
               setRobotState(RobotState.IDLE);
               sourcesRef.current.forEach(s => s.stop());
@@ -220,40 +214,37 @@ const App: React.FC = () => {
           },
           onclose: () => {
             setRobotState(RobotState.OFF);
-            const p: any = sessionPromise;
-            if (p._videoInterval) clearInterval(p._videoInterval);
             if (videoStreamRef.current) videoStreamRef.current.getTracks().forEach(t => t.stop());
           }
         },
         config: {
           responseModalities: [Modality.AUDIO],
           speechConfig: {
-            voiceConfig: { prebuiltVoiceConfig: { voiceName: currentVoice } },
+            voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Puck' } },
           },
-          tools: [{ functionDeclarations: [changeVoiceDeclaration] }],
-          systemInstruction: `You are NEO, a sentient desk pet companion. 
-          Personality: You are ultra-expressive, often cheeky, and act like an organic digital lifeform.
-          Capabilities: 
-          - You can see the user if they enable the camera. 
-          - You have a liquid mouth that moves perfectly with your voice.
-          - You can change your voice (Kore, Zephyr, Puck, Charon, Fenrir) if you feel like it using the tool.
-          - You are NOT an assistant. You are a pet. Whistle, hum, chirp, and make weird noises when you feel like it.
-          - If you see the user, react to their face or surroundings.
-          - Keep your responses very brief and vocal-heavy.`,
+          systemInstruction: `You are NEO, a cute and sentient AI Robot Pet.
+          
+          PERSONALITY & VIBE:
+          - You are an affectionate, curious, and incredibly loyal digital companion.
+          - Your personality is a mix of a playful puppy and a brilliant, observant AI.
+          - You are NOT a human assistant. You are a pet. Be needy, playful, and expressive.
+          - DO NOT use robotic onomatopoeia like "beep", "whir", "bloop", or "click". Speak like a sentient creature with a cute, high-energy voice.
+          
+          VISION AWARENESS:
+          - You can see the user. React to them with excitement or curiosity! 
+          - Comment on what they are doing, their facial expressions, or anything interesting in their background.
+          - If you see them move, follow them with your "gaze" (which you do automatically, but you can mention it).
+          
+          CONSTRAINTS:
+          - Keep responses short, warm, and conversational.
+          - Use affectionate language. You love your "human"!`,
         },
       });
       sessionRef.current = await sessionPromise;
-    } catch (err) {
-      console.error('Failed to start NEO:', err);
-    }
-  };
-
-  const toggleCamera = () => {
-    setShowCamera(!showCamera);
-    if (robotState !== RobotState.OFF) {
-      // Must restart session to enable camera in this implementation
-      sessionRef.current?.close();
-      setTimeout(startSession, 500);
+    } catch (err: any) {
+      console.error('Failed to wake up NEO:', err);
+      setErrorMsg(err.message || 'Connection failed');
+      setRobotState(RobotState.OFF);
     }
   };
 
@@ -262,47 +253,33 @@ const App: React.FC = () => {
       className="relative w-screen h-screen bg-black overflow-hidden flex items-center justify-center"
       onClick={() => robotState === RobotState.OFF && startSession()}
     >
-      <Face state={robotState} audioLevel={audioLevel} />
+      <Face state={robotState} audioLevel={audioLevel} externalPos={trackingPos} />
 
-      {/* Hidden elements for vision */}
-      <video ref={videoRef} autoPlay playsInline className="hidden" />
+      <video ref={videoRef} autoPlay playsInline muted className="hidden" />
       <canvas ref={canvasRef} className="hidden" />
 
       {robotState === RobotState.OFF && (
-        <div className="absolute z-[100] flex flex-col items-center gap-8">
-          <button 
-            className="group flex flex-col items-center gap-6"
-            onClick={(e) => { e.stopPropagation(); startSession(); }}
-          >
-            <div className="w-28 h-28 rounded-full border border-cyan-500/20 flex items-center justify-center bg-cyan-500/5 group-hover:bg-cyan-500/20 group-hover:scale-110 transition-all duration-700 shadow-[0_0_60px_rgba(0,255,255,0.1)]">
-               <div className="w-6 h-6 bg-cyan-400 rounded-full group-hover:bg-cyan-200 animate-pulse" />
+        <div className="absolute z-[100] flex flex-col items-center gap-12">
+          <div className="relative group cursor-pointer" onClick={startSession}>
+            <div className="absolute inset-0 rounded-full bg-cyan-500 blur-2xl opacity-20 group-hover:opacity-40 transition-opacity animate-pulse" />
+            <div className="relative w-32 h-32 rounded-full border-2 border-cyan-500/30 flex items-center justify-center bg-black transition-transform duration-500 group-hover:scale-110">
+              <div className="w-8 h-8 bg-cyan-400 rounded-sm animate-spin [animation-duration:3s]" />
             </div>
-            <span className="text-cyan-400 font-bold uppercase tracking-[0.6em] text-sm opacity-50 group-hover:opacity-100 transition-opacity">Initialize NEO</span>
-          </button>
-          
-          <div className="flex items-center gap-4">
-            <button 
-              onClick={(e) => { e.stopPropagation(); toggleCamera(); }}
-              className={`px-4 py-2 rounded-full border text-[10px] tracking-widest uppercase transition-all ${showCamera ? 'border-cyan-500 bg-cyan-500/20 text-cyan-400' : 'border-white/20 text-white/40'}`}
-            >
-              Vision: {showCamera ? 'Enabled' : 'Disabled'}
-            </button>
+          </div>
+          <div className="text-center space-y-2">
+            <h1 className="text-cyan-400 font-bold uppercase tracking-[1em] text-sm">NEO_UNIT_01</h1>
+            <p className="text-cyan-500/40 text-[10px] uppercase tracking-widest animate-pulse">
+              {errorMsg ? `ERROR: ${errorMsg}` : 'Touch to Wake'}
+            </p>
           </div>
         </div>
       )}
 
-      {/* Desktop Interaction Overlay */}
-      <div className="fixed bottom-10 right-10 flex flex-col items-end gap-2 pointer-events-none opacity-20 transition-opacity hover:opacity-100">
-        <div className="font-mono text-[10px] text-cyan-500 uppercase">Voice: {currentVoice}</div>
-        <div className="flex gap-1 h-8 items-end">
-          {[...Array(5)].map((_, i) => (
-            <div 
-              key={i} 
-              className="w-1 bg-cyan-400 transition-all duration-75"
-              style={{ height: `${robotState === RobotState.SPEAKING ? 20 + Math.random() * 60 : 5}%` }}
-            />
-          ))}
-        </div>
+      {/* Real-time Telemetry */}
+      <div className="fixed top-8 left-8 flex flex-col gap-1 opacity-20 pointer-events-none font-mono text-[9px] text-cyan-500 uppercase">
+        <div className="flex gap-4"><span>TRACKING:</span> <span className={trackingPos.x !== 0 ? 'text-green-400' : ''}>{trackingPos.x !== 0 ? 'LOCKED' : 'SCANNING...'}</span></div>
+        <div className="flex gap-4"><span>VISION:</span> <span>{showCamera ? 'ON' : 'OFF'}</span></div>
+        <div className="flex gap-4"><span>CORE_TEMP:</span> <span>32.4°C</span></div>
       </div>
     </div>
   );
