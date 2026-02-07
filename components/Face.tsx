@@ -1,5 +1,5 @@
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import Eye from './Eye';
 import Mouth from './Mouth';
 import { RobotState } from '../types';
@@ -14,6 +14,18 @@ const Face: React.FC<FaceProps> = ({ state, audioLevel, externalPos }) => {
   const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
   const [saccade, setSaccade] = useState({ x: 0, y: 0 });
   const [tilt, setTilt] = useState(0);
+  const [time, setTime] = useState(0);
+
+  // Animation frame loop for smooth continuous motions (nodding, breathing)
+  useEffect(() => {
+    let frame: number;
+    const tick = () => {
+      setTime(prev => prev + 0.05);
+      frame = requestAnimationFrame(tick);
+    };
+    tick();
+    return () => cancelAnimationFrame(frame);
+  }, []);
 
   useEffect(() => {
     const handleMouseMove = (e: MouseEvent) => {
@@ -54,6 +66,20 @@ const Face: React.FC<FaceProps> = ({ state, audioLevel, externalPos }) => {
     y: (externalPos.y !== 0 ? externalPos.y : mousePos.y) + saccade.y
   };
 
+  // Continuous subtle motions
+  const nodY = useMemo(() => {
+    if (state === RobotState.LISTENING) {
+      // Gentle, slow nodding for active listening
+      return Math.sin(time * 2.5) * 12;
+    }
+    // Subtle breathing motion otherwise
+    return Math.sin(time * 0.8) * 4;
+  }, [state, time]);
+
+  const scalePulse = useMemo(() => {
+    return 1 + (Math.sin(time * 0.5) * 0.015);
+  }, [time]);
+
   return (
     <div className="relative w-full h-screen flex flex-col items-center justify-center bg-black overflow-hidden select-none">
       {/* Dynamic Background Pulse */}
@@ -67,9 +93,9 @@ const Face: React.FC<FaceProps> = ({ state, audioLevel, externalPos }) => {
       />
 
       <div 
-        className="flex flex-col items-center transition-transform duration-[800ms] cubic-bezier(0.23, 1, 0.32, 1)"
+        className="flex flex-col items-center transition-transform duration-[800ms] ease-out"
         style={{ 
-          transform: `rotate(${tilt}deg) scale(${1 + (Math.sin(Date.now() / 2500) * 0.01)})`,
+          transform: `translateY(${nodY}px) rotate(${tilt}deg) scale(${scalePulse})`,
         }}
       >
         <div className="flex items-center justify-center gap-24 md:gap-40">
