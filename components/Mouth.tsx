@@ -25,16 +25,12 @@ const Mouth: React.FC<MouthProps> = ({ state, audioLevel }) => {
 
   const path = useMemo(() => {
     if (state === RobotState.SPEAKING) {
-      // Dynamic talking: Mouth opens vertically and slightly narrows horizontally
-      // Height mirrors level aggressively with a bit of a multiplier
       const h = 6 + level * 120; 
-      const w = 55 - level * 15; // Narrows as it opens for realism
-      
+      const w = 55 - level * 15; 
       return `M ${-w/2} 0 Q 0 ${h} ${w/2} 0 Q 0 ${-h} ${-w/2} 0`;
     } 
     
     if (state === RobotState.SINGING) {
-      // Rhythmic droid hum - pulses between a circle and a rounded diamond
       const baseR = 25;
       const pulse = Math.sin(time * 3.5) * 8;
       const r = baseR + pulse;
@@ -42,27 +38,27 @@ const Mouth: React.FC<MouthProps> = ({ state, audioLevel }) => {
     }
 
     if (state === RobotState.DISTORTED) {
-      // Glitchy zigzag
       const off = () => (Math.random() - 0.5) * 40;
       return `M -50 ${off()} L -20 ${off()} L 10 ${off()} L 40 ${off()}`;
     }
 
     if (state === RobotState.HAPPY) {
-      // Sweet wide smile
       const bounce = Math.sin(time * 2) * 2;
       return `M -40 -8 Q 0 ${22 + bounce} 40 -8`;
     }
 
     if (state === RobotState.LISTENING) {
-      // Expectant curve
       const pulse = Math.sin(time * 1.5) * 3;
       return `M -25 0 Q 0 ${12 + pulse} 25 0`;
     }
 
-    // Default: Resting digital line with subtle breathing
-    const breath = Math.sin(time * 0.8) * 4;
-    const w = 45 + Math.cos(time * 0.4) * 5;
-    return `M ${-w/2} 0 Q 0 ${breath} ${w/2} 0`;
+    // Default/IDLE: Resting digital line with subtle breathing and organic noise
+    // Added noise factors (Math.sin with different frequencies) to prevent static look
+    const noiseY = Math.sin(time * 0.8) * 4 + Math.sin(time * 2.2) * 1.5;
+    const noiseW = Math.cos(time * 0.4) * 5 + Math.sin(time * 1.7) * 2;
+    const w = 45 + noiseW;
+    
+    return `M ${-w/2} 0 Q 0 ${noiseY} ${w/2} 0`;
   }, [state, level, time]);
 
   return (
@@ -75,7 +71,7 @@ const Mouth: React.FC<MouthProps> = ({ state, audioLevel }) => {
           </filter>
         </defs>
         
-        {/* Dynamic Shadow Layer (Reacts to Speech) */}
+        {/* Dynamic Shadow Layer */}
         <path
           d={path}
           fill="none"
@@ -95,7 +91,6 @@ const Mouth: React.FC<MouthProps> = ({ state, audioLevel }) => {
           className="transition-all duration-[100ms] ease-out"
           style={{
             filter: `drop-shadow(0 0 ${12 + level * 60}px rgba(34, 211, 238, 1))`,
-            // Vibration during loud speech
             transform: state === RobotState.SPEAKING && level > 0.05 
               ? `translate(${(Math.random()-0.5)*3}px, ${(Math.random()-0.5)*3}px)` 
               : 'none'
